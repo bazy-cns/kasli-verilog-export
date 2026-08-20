@@ -1,0 +1,8 @@
+{
+  "_description": "Minimal standalone Kasli v2.0.2 gateware for Verilog export",
+  "target": "kasli",
+  "variant": "kasli_v2_0_2_minimal",
+  "hw_rev": "v2.0",
+  "base": "standalone",
+  "peripherals": []
+}
