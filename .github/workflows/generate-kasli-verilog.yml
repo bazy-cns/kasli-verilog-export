@@ -1,4 +1,4 @@
-name: Generate Kasli v2.0.2 Verilog
+name: Generate Kasli v2.0.2 Verilog and Sources
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  generate-verilog:
+  generate-delivery:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
 
@@ -35,6 +35,22 @@ jobs:
             https://git.m-labs.hk/M-Labs/artiq.git \
             artiq
 
+      - name: Download pinned Migen and MiSoC sources
+        run: |
+          MIGEN_REV=$(jq -r '.nodes["src-migen"].locked.rev' artiq/flake.lock)
+          MISOC_REV=$(jq -r '.nodes["src-misoc"].locked.rev' artiq/flake.lock)
+
+          git clone --filter=blob:none --no-checkout \
+            https://git.m-labs.hk/M-Labs/migen.git migen
+          git -C migen fetch --depth 1 origin "$MIGEN_REV"
+          git -C migen checkout --detach "$MIGEN_REV"
+
+          git clone --filter=blob:none --no-checkout \
+            https://git.m-labs.hk/M-Labs/misoc.git misoc
+          git -C misoc fetch --depth 1 origin "$MISOC_REV"
+          git -C misoc checkout --detach "$MISOC_REV"
+          git -C misoc submodule update --init --recursive --depth 1
+
       - name: Generate Verilog without Vivado
         run: |
           cd artiq
@@ -47,21 +63,74 @@ jobs:
               --no-compile-software \
               ../kasli_v2_0_2.json
 
-      - name: Prepare export package
+      - name: Assemble Verilog and Python source delivery
         run: |
-          mkdir -p kasli-verilog-export
-          cp kasli_v2_0_2.json kasli-verilog-export/
-          cp -a \
-            artiq/artiq_kasli/kasli_v2_0_2_minimal/gateware \
-            kasli-verilog-export/
-          git -C artiq rev-parse HEAD > kasli-verilog-export/ARTIQ_COMMIT.txt
-          cp artiq/flake.lock kasli-verilog-export/ARTIQ_FLAKE_LOCK.json
-          test -s kasli-verilog-export/gateware/top.v
+          DELIVERY=kasli-v2.0.2-verilog-python-migen-sources
+          mkdir -p "$DELIVERY/config"
+          mkdir -p "$DELIVERY/generated-gateware"
+          mkdir -p "$DELIVERY/sources/artiq"
+          mkdir -p "$DELIVERY/sources/migen"
+          mkdir -p "$DELIVERY/sources/misoc"
 
-      - name: Upload Verilog package
+          cp kasli_v2_0_2.json "$DELIVERY/config/"
+          cp -a \
+            artiq/artiq_kasli/kasli_v2_0_2_minimal/gateware/. \
+            "$DELIVERY/generated-gateware/"
+
+          git -C artiq archive HEAD | tar -x -C "$DELIVERY/sources/artiq"
+          tar --exclude-vcs -C migen -cf - . | tar -x -C "$DELIVERY/sources/migen"
+          tar --exclude-vcs -C misoc -cf - . | tar -x -C "$DELIVERY/sources/misoc"
+
+          ARTIQ_COMMIT=$(git -C artiq rev-parse HEAD)
+          MIGEN_COMMIT=$(git -C migen rev-parse HEAD)
+          MISOC_COMMIT=$(git -C misoc rev-parse HEAD)
+
+          cat > "$DELIVERY/SOURCE_VERSIONS.txt" <<EOF
+          ARTIQ repository: https://git.m-labs.hk/M-Labs/artiq.git
+          ARTIQ branch: release-9
+          ARTIQ commit: $ARTIQ_COMMIT
+
+          Migen repository: https://git.m-labs.hk/M-Labs/migen.git
+          Migen commit pinned by ARTIQ flake.lock: $MIGEN_COMMIT
+
+          MiSoC repository: https://git.m-labs.hk/M-Labs/misoc.git
+          MiSoC commit pinned by ARTIQ flake.lock: $MISOC_COMMIT
+
+          Kasli PCB release: v2.0.2
+          ARTIQ hardware revision selector: v2.0
+          EOF
+
+          cat > "$DELIVERY/README_CN.md" <<'EOF'
+          # Kasli v2.0.2 Verilog与Python/Migen源码交付包
+
+          本包用于向FPGA工程师展示Kasli v2.0.2对应的FPGA逻辑及其生成来源。
+
+          - `generated-gateware/`：由ARTIQ/Migen生成的Verilog、约束和工程文件；入口为`top.v`。
+          - `sources/artiq/`：对应版本的ARTIQ完整源码，Kasli顶层入口为`artiq/gateware/targets/kasli.py`。
+          - `sources/migen/`：ARTIQ锁定版本的Migen硬件描述框架。
+          - `sources/misoc/`：ARTIQ锁定版本的MiSoC及其子模块源码。
+          - `config/kasli_v2_0_2.json`：本次生成所用的最小Kasli系统配置。
+          - `SOURCE_VERSIONS.txt`：各源码仓库的精确提交号。
+
+          Kasli PCB版本v2.0.2在ARTIQ中使用`"hw_rev": "v2.0"`。这里的Python不是在设备运行时逐条控制FPGA，而是利用Migen描述寄存器、状态机、总线、时钟域和接口连接，构建时生成Verilog；Verilog再交给Vivado进行综合、布局布线并产生FPGA比特流。本包只生成到Verilog阶段，没有调用Vivado。
+          EOF
+
+          cat > "$DELIVERY/WECHAT_MESSAGE_CN.txt" <<'EOF'
+          我们已经从ARTIQ开源工程中提取并复现了Kasli v2.0.2核心控制器的FPGA源码生成流程。ARTIQ采用Python/Migen编写硬件逻辑，这里的Python不是普通上位机程序，而是一种硬件生成描述：工程师用Python定义寄存器、状态机、总线、时钟域和接口关系，Migen再把这些结构展开成标准Verilog源码，随后可交给Vivado综合成FPGA镜像。现在交付包中同时包含生成后的Verilog、原始ARTIQ Python gateware、对应版本的Migen/MiSoC源码、系统JSON和精确提交号，便于传统FPGA工程师直接阅读Verilog，同时能够向上追溯每段逻辑的生成来源。
+          EOF
+
+          test -s "$DELIVERY/generated-gateware/top.v"
+          test -f "$DELIVERY/sources/artiq/artiq/gateware/targets/kasli.py"
+          test -f "$DELIVERY/sources/migen/migen/fhdl/verilog.py"
+          test -d "$DELIVERY/sources/misoc/misoc"
+
+          find "$DELIVERY" -type f | sort > "$DELIVERY/FILE_LIST.txt"
+          du -sh "$DELIVERY"
+
+      - name: Upload complete delivery ZIP
         uses: actions/upload-artifact@v7
         with:
-          name: kasli-v2.0.2-verilog
-          path: kasli-verilog-export
+          name: kasli-v2.0.2-verilog-python-migen-sources
+          path: kasli-v2.0.2-verilog-python-migen-sources
           if-no-files-found: error
           retention-days: 14
