@@ -1,0 +1,67 @@
+name: Generate Kasli v2.0.2 Verilog
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "kasli_v2_0_2.json"
+      - ".github/workflows/generate-kasli-verilog.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  generate-verilog:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout configuration
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            extra-substituters = https://nixbld.m-labs.hk
+            extra-trusted-public-keys = nixbld.m-labs.hk-1:5aSRVA5b320xbNvu30tqxVPXpld73bhtOeH6uAjRyHc=
+
+      - name: Download ARTIQ release-9
+        run: |
+          git clone \
+            --depth 1 \
+            --branch release-9 \
+            https://git.m-labs.hk/M-Labs/artiq.git \
+            artiq
+
+      - name: Generate Verilog without Vivado
+        run: |
+          cd artiq
+          nix develop \
+            --accept-flake-config \
+            .#boards \
+            --command \
+            python -m artiq.gateware.targets.kasli \
+              --no-compile-gateware \
+              --no-compile-software \
+              ../kasli_v2_0_2.json
+
+      - name: Prepare export package
+        run: |
+          mkdir -p kasli-verilog-export
+          cp kasli_v2_0_2.json kasli-verilog-export/
+          cp -a \
+            artiq/artiq_kasli/kasli_v2_0_2_minimal/gateware \
+            kasli-verilog-export/
+          git -C artiq rev-parse HEAD > kasli-verilog-export/ARTIQ_COMMIT.txt
+          cp artiq/flake.lock kasli-verilog-export/ARTIQ_FLAKE_LOCK.json
+          test -s kasli-verilog-export/gateware/top.v
+
+      - name: Upload Verilog package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kasli-v2.0.2-verilog
+          path: kasli-verilog-export
+          if-no-files-found: error
+          retention-days: 14
